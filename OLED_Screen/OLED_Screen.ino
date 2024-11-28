@@ -1,47 +1,54 @@
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
+#include <SoftwareSerial.h>
 
-#define SCREEN_WIDTH 128 // OLED display width, in pixels
-#define SCREEN_HEIGHT 64 // OLED display height, in pixels
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
 
-// Declaration for an SSD1306 display connected to I2C (SDA, SCL pins)
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 
-// Set up SoftwareSerial to communicate with the ESP32
-SoftwareSerial mySerial(10, 11); // RX = pin 10, TX = pin 11
+#define RX_PIN 10
+#define TX_PIN 11
 
+SoftwareSerial mySerial(RX_PIN, TX_PIN);  // RX, TX
 
-String BAC_Level = "0.00";
+String BAC_Level = "";
 
 void setup() {
-  Serial.begin(9600); // Previously 115200
+  Serial.begin(115200);
+  mySerial.begin(9600);  // Match the ESP32 baud rate
 
-  if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) { // Address 0x3D for 128x64
+  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
     Serial.println(F("SSD1306 allocation failed"));
-    for(;;);
+    for (;;)
+      ;
   }
-  delay(2000);
   display.clearDisplay();
+  display.setTextSize(3);
+  display.setTextColor(WHITE);
+  display.setCursor(0, 10);
+  display.println("BAC: ");
+  display.display();
 }
 
 void loop() {
   if (mySerial.available()) {
-    BAC_Level = mySerial.readStringUntil('\n'); // Read the BAC level from ESP32
-    Serial.print("Received BAC Level from ESP32: ");
-    Serial.println(BAC_Level);
+    // Read the entire line until newline character
+    String receivedData = mySerial.readStringUntil('\n');
 
-    // Display the BAC Level on OLED
+    // Print the full received line to the Serial Monitor for debugging
+    Serial.print("Received full line: '");
+    Serial.print(receivedData);
+    Serial.println("'");
+
+    // Update OLED with the received data
     display.clearDisplay();
-    display.setTextSize(3);
-    display.setTextColor(WHITE);
     display.setCursor(0, 10);
-    display.println("BAC:");
-    display.setCursor(0, 40);
-    display.println(BAC_Level);
+    display.setTextSize(1);
+    display.println("BAC: ");
+    display.setCursor(0, 30);
+    display.println(receivedData);
     display.display();
   }
-
-  delay(1000); // update every second
 }
-
