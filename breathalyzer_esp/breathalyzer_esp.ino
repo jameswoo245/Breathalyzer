@@ -232,7 +232,7 @@ String calculateAndSendAverageBAC() {
   bacSum = 0.0;
   bacReadCount = 0;
 
-  if (averageBAC > 900)
+  if (averageBAC > 800)
     return "HI";
   else
     return "LO";
