@@ -1,66 +1,139 @@
 #include <WiFi.h>
-#include <HTTPClient.h>
+#include <ArduinoJson.h> // Include the ArduinoJson library
 
+// Pins
 #define BUZZER 25
 #define MQ3_PIN 34 // Analog pin for MQ-3 sensor
 #define TMP_PIN 35
+#define freqSwitch 15
+#define PHOTO_PIN 32
+
+
 const int buttonPin = 13;
+const int trigPin = 23; // Ultrasonic sensor trig pin
+const int echoPin = 22; // Ultrasonic sensor echo pin
 
-const int trigPin = 26; // Ultrasonic sensor trig pin
-const int echoPin = 27; // Ultrasonic sensor echo pin
+const int redLed = 2;    // Red LED pin
+const int greenLed = 4;  // Green LED pin
 
-volatile bool buttonPressed = false;
-bool isSensorActive = false;
-unsigned long startTime = 0; 
-const unsigned long activeDuration = 7000; 
-const unsigned long sensorInterval = 10000; // 10 seconds interval
-unsigned long lastSensorReadTime = 0; // Timestamp of the last sensor reading
-
-float bacSum = 0.0;        // Sum of BAC readings
-int bacReadCount = 0;      // Count of BAC readings
+volatile bool isPeriodicMode = true; // Initially enabled
 
 // Wi-Fi credentials
-const char* ssid = "J";
-const char* password = "brokencl9";
+const char* ssid = "Master";
+const char* password = "password123";
 
-// Server URL for posting data
-const char* serverName = "http://httpbin.org/post"; // Replace with your server endpoint
+// Master ESP32 IP and port
+const char* masterIP = "192.168.4.1"; // Update with the master ESP32's IP
+const int masterPort = 80;
 
-// Use hardware UART2 on ESP32
-HardwareSerial arduino(2); // UART2 for communication with Arduino Uno
+// WiFi Client
+WiFiClient client;
+
+// Sensor variables
+volatile bool buttonPressed = false;
+bool isSensorActive = false;
+unsigned long startTime = 0;
+const unsigned long activeDuration = 7000;
+unsigned long sensorInterval = 10000; // 10 seconds interval
+unsigned long lastSensorReadTime = 0;
+
+// Global variables for distance and temperature
+int globalDistance = -1; // -1 indicates no valid reading yet
+float globalTemperature = -1.0; // -1 indicates no valid reading yet
+int globalphotocellValue = -1;
+const int maxAllowedDistance = 200; // Maximum distance allowed for on-demand mode (in cm)
+const float maxAllowedTemperature = 100.0; // Maximum temperature allowed for on-demand mode (in Â°F)
+
+float bacSum = 0.0;
+int bacReadCount = 0;
+
+// Functions declarations
+void connectToWiFi();
+void connectToMaster();
+void sendDataToMaster(float bac, int distance, float temperatureF, int globalphotocellValue);
+void activateSensor();
+void standbySensor();
+void buzz();
+void readAlc();
+String calculateAndSendAverageBAC();
+int readUltrasonicSensor();
+float readTemperatureSensor();
+void buttonISR();
+String mode;
 
 void setup() {
-  Serial.begin(115200);    // Serial Monitor for debugging
-  arduino.begin(9600, SERIAL_8N1, 16, 17); // Use RX2 (GPIO16), TX2 (GPIO17) for UART communication
-  pinMode(BUZZER, OUTPUT);
-  pinMode(buttonPin, INPUT_PULLUP); 
-  pinMode(trigPin, OUTPUT); // Ultrasonic sensor trig pin
-  pinMode(echoPin, INPUT);  // Ultrasonic sensor echo pin
-  attachInterrupt(digitalPinToInterrupt(buttonPin), buttonISR, FALLING); 
+  Serial.begin(115200);
+  pinMode(freqSwitch, INPUT);
 
-  // Connect to Wi-Fi
+  pinMode(BUZZER, OUTPUT);
+  pinMode(buttonPin, INPUT_PULLUP);
+  pinMode(trigPin, OUTPUT);
+  pinMode(echoPin, INPUT);
+  pinMode(redLed, OUTPUT);
+  pinMode(greenLed, OUTPUT);
+  pinMode(PHOTO_PIN, INPUT);
+
+  attachInterrupt(digitalPinToInterrupt(buttonPin), buttonISR, FALLING);
+
   connectToWiFi();
 }
 
 void loop() {
-  // Check if it's time to read the ultrasonic and temperature sensors
-  if (millis() - lastSensorReadTime >= sensorInterval) {
-    lastSensorReadTime = millis();
-    int distance = readUltrasonicSensor();
-    float temperatureF = readTemperatureSensor();
-    sendDataToServer(distance, temperatureF);
+  // Update the global distance and temperature variables
+  globalDistance = readUltrasonicSensor();
+  globalTemperature = readTemperatureSensor();
+  globalphotocellValue = readPhotocellSensor();
+
+
+  // Check for commands from the master
+  if (client.available()) {
+    String receivedData = client.readStringUntil('\n');
+    Serial.println("Received from Master: " + receivedData);
+
+    // Parse the received JSON data
+    StaticJsonDocument<200> doc;
+    DeserializationError error = deserializeJson(doc, receivedData);
+
+    if (!error) {
+      if (doc.containsKey("PeriodicMode")) {
+        const char* periodicMode = doc["PeriodicMode"];
+        isPeriodicMode = strcmp(periodicMode, "Enabled") == 0;
+      }
+    }
   }
 
-  // If the sensor is active, read the alcohol sensor until the duration ends
+  int switchState = digitalRead(freqSwitch);
+  if (switchState == HIGH) {
+    sensorInterval = 10000; // 10-second interval
+  } else {
+    sensorInterval = 2000;  // 2-second interval
+  }
+
+  // If the button is pressed (sensor active), read and send data immediately
   if (isSensorActive) {
-    if (millis() - startTime <= activeDuration) {
-      buzz();     // Activate the buzzer while reading
-      readAlc();  // Read alcohol sensor data and accumulate BAC
+    if (millis() - startTime >= activeDuration) {
+      // Stop on-demand processing after active duration
+      isSensorActive = false;
+      noTone(BUZZER); // Stop the buzzer
+      Serial.println("On Demand Mode Ended. Returning to Periodical Mode.");
     } else {
-      noTone(BUZZER);          // Turn off buzzer when done reading
-      calculateAndSendAverageBAC(); // Calculate and send average BAC via UART
-      standbySensor();         // Deactivate the sensor after the duration
+      // Perform immediate sensor readings and send data
+      mode = "On Demand";
+      buzz();
+      readAlc();
+      String bac = calculateAndSendAverageBAC();
+      sendDataToMaster(bac, globalDistance, globalTemperature,globalphotocellValue);
+      return; // Skip periodic processing while in on-demand mode
     }
+  }
+
+  if (isPeriodicMode && millis() - lastSensorReadTime >= sensorInterval) {
+    lastSensorReadTime = millis();
+    mode = "Periodical";
+    readAlc();
+    // Perform periodic sensor readings and send data
+    String bac = calculateAndSendAverageBAC();
+    sendDataToMaster(bac, globalDistance, globalTemperature, globalphotocellValue);
   }
 }
 
@@ -78,118 +151,61 @@ void connectToWiFi() {
   Serial.println(WiFi.localIP());
 }
 
-int readUltrasonicSensor() {
-  // Send a pulse to the ultrasonic sensor
-  digitalWrite(trigPin, LOW);
-  delayMicroseconds(2);
-  digitalWrite(trigPin, HIGH);
-  delayMicroseconds(10);
-  digitalWrite(trigPin, LOW);
-
-  // Measure the time of flight
-  long duration = pulseIn(echoPin, HIGH);
-  int distance = duration * 0.034 / 2; // Convert to distance in cm
-
-  Serial.print("Ultrasonic Distance: ");
-  Serial.print(distance);
-  Serial.println(" cm");
-
-  // Send distance to Arduino Uno
-  arduino.println("DIST:" + String(distance));
-  delay(10);
-
-  return distance;
-}
-
-float readTemperatureSensor() {
-  int sensorValue = analogRead(TMP_PIN); // Read analog value from TMP36
-  float voltage = (sensorValue / 1023.0) * 5.0; // Convert to voltage (10-bit ADC, 5V reference)
-  float temperatureC = (voltage - 0.5) * 100.0; // Convert voltage to temperature in Celsius
-  float temperatureF = (temperatureC * 9.0 / 5.0) + 32.0; // Convert Celsius to Fahrenheit
-
-  Serial.print("Temperature: ");
-  Serial.print(temperatureF);
-  Serial.println(" Â°F");
-
-  // Send temperature to Arduino Uno
-  arduino.println("TEMP:" + String(temperatureF, 2));
-  delay(10);
-
-  return temperatureF;
-}
-
-void readAlc() {
-  int sensorValue = analogRead(MQ3_PIN); 
-  float voltage = (sensorValue / 4095.0) * 5.0; 
-  float bac = map(sensorValue, 200, 4000, 0, 500) / 1000.0; 
-
-  bacSum += bac - 0.02;
-  bacReadCount++;
-
-  Serial.print("MQ-3 Sensor Value: ");
-  Serial.print(sensorValue);
-  Serial.print(" | Voltage: ");
-  Serial.print(voltage, 2);
-  Serial.print("V | Current BAC: ");
-  Serial.println(bac - 0.02, 3);
-}
-
-void calculateAndSendAverageBAC() {
-  if (bacReadCount > 0) {
-    float averageBAC = bacSum / bacReadCount;
-    Serial.print("Average BAC during active period: ");
-    Serial.println(averageBAC, 2);
-
-    if (averageBAC < 0) averageBAC *= -1;
-
-    // Send average BAC to Arduino Uno
-    arduino.println("AVG:" + String(averageBAC, 2));
-    Serial.println("Sent to Uno: " + String(averageBAC, 2));
-
-    bacSum = 0.0;
-    bacReadCount = 0;
-  } else {
-    Serial.println("No BAC readings recorded.");
-    arduino.println("No BAC readings recorded.");
+void connectToMaster() {
+  if (!client.connected()) {
+    Serial.println("Connecting to Master...");
+    for (int attempt = 0; attempt < 3; attempt++) { // Retry up to 3 times
+      if (client.connect(masterIP, masterPort)) {
+        Serial.println("Connected to Master!");
+        return;
+      } else {
+        Serial.println("Failed to connect to Master. Retrying...");
+        delay(500); // Short delay before retrying
+      }
+    }
+    Serial.println("Failed to connect to Master after 3 attempts.");
   }
 }
 
-void sendDataToServer(int distance, float temperatureF) {
-  if (WiFi.status() == WL_CONNECTED) {
-    HTTPClient http;
+void sendDataToMaster(String bac, int distance, float temperatureF, int photocellValue) {
+  connectToMaster();
+  if (bac == "HI") {
+    digitalWrite(redLed, HIGH);   // Turn on red LED
+    digitalWrite(greenLed, LOW);  // Turn off green LED
+  } else {
+    digitalWrite(greenLed, HIGH); // Turn on green LED
+    digitalWrite(redLed, LOW);    // Turn off red LED
+  }
 
-    http.begin(serverName); // Specify server URL
-    http.addHeader("Content-Type", "application/json");
-
-    // Create JSON payload
+ if (client.connected()) {
+    // Create and send JSON data
     String payload = "{";
+    payload += "\"Mode\":\"" + mode + "\",";
+    payload += "\"Alcohol Level\":\"" + bac + "\",";
     payload += "\"distance\":" + String(distance) + ",";
-    payload += "\"temperature\":" + String(temperatureF, 2);
+    payload += "\"temperature\":" + String(temperatureF, 2) + ",";
+    payload += "\"photocell\":" + String(photocellValue) + ",";
+    payload += "\"time\":" + String(sensorInterval/1000);
     payload += "}";
 
-    int httpResponseCode = http.POST(payload);
+    client.println(payload);
+    Serial.println("Data sent to Master: " + payload);
 
-    // Print the response code
-    if (httpResponseCode > 0) {
-      Serial.print("HTTP Response Code: ");
-      Serial.println(httpResponseCode);
-    } else {
-      Serial.print("Error sending data. Code: ");
-      Serial.println(httpResponseCode);
-    }
-
-    http.end(); // Free resources
   } else {
-    Serial.println("Wi-Fi not connected. Cannot send data.");
+    Serial.println("Cannot send data, Master not connected.");
   }
 }
 
 void activateSensor() {
-  isSensorActive = true;
-  startTime = millis(); // Record the current time
-  bacSum = 0.0;         // Reset sum
-  bacReadCount = 0;     // Reset count
-  Serial.println("Sensor Activated");
+  if (globalDistance > 0 && globalDistance <= maxAllowedDistance && globalTemperature >= 0 && globalTemperature <= maxAllowedTemperature) {
+    isSensorActive = true;
+    startTime = millis();
+    bacSum = 0.0;
+    bacReadCount = 0;
+    Serial.println("Sensor Activated for On-Demand Reading.");
+  } else {
+    Serial.println("On-Demand Activation Failed: Distance or Temperature Out of Range.");
+  }
 }
 
 void standbySensor() {
@@ -197,12 +213,65 @@ void standbySensor() {
   Serial.println("Sensor in Standby");
 }
 
-void buttonISR() {
-  if (!isSensorActive) {
-    activateSensor(); // Activate sensor on button press
-  }
-}
-
 void buzz() {
   tone(BUZZER, 500); // Generate a 500Hz tone
+}
+
+void readAlc() {
+  int sensorValue = analogRead(MQ3_PIN);
+  bacSum += sensorValue;
+  bacReadCount++;
+
+  Serial.print("MQ-3 Sensor Value: ");
+  Serial.print(sensorValue);
+  Serial.println();
+}
+
+String calculateAndSendAverageBAC() {
+  float averageBAC = bacSum / bacReadCount;
+  bacSum = 0.0;
+  bacReadCount = 0;
+
+  if (averageBAC > 900)
+    return "HI";
+  else
+    return "LO";
+}
+
+int readUltrasonicSensor() {
+  digitalWrite(trigPin, LOW);
+  delayMicroseconds(2);
+  digitalWrite(trigPin, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trigPin, LOW);
+
+  long duration = pulseIn(echoPin, HIGH, 30000); // Timeout after 30 ms
+
+  if (duration == 0) {
+    return -1;
+  }
+  int distance = (duration * 0.0343) / 2;
+  if (distance < 2 || distance > 400) {
+    return -1; // Invalid readings
+  }
+  return distance;
+}
+
+float readTemperatureSensor() {
+  int sensorValue = analogRead(TMP_PIN);
+  float voltage = (sensorValue / 4095.0) * 3.3;
+  float temperatureC = (voltage - 0.5) * 100.0;
+  float temperatureF = (temperatureC * 9.0 / 5.0) + 32.0;
+
+  // Ensure only positive values are returned
+  return (temperatureF >= 0) ? temperatureF : 0;
+}
+
+int readPhotocellSensor()
+{
+  return analogRead(PHOTO_PIN);
+}
+
+void buttonISR() {
+  activateSensor();
 }
