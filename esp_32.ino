@@ -48,7 +48,7 @@ void setup() {
   display.setCursor(0, 10);
   display.println("WARMING UP");
   display.display();
-  // delay(30000) // 30 sec warm up period
+  delay(30000) // 30 sec warm up period
 }
 
 void loop() {
@@ -90,7 +90,7 @@ void loop() {
         int brightness = (photocellValue > 2000) ? 255 : 50; // Bright or dim based on threshold
         // Adjust OLED brightness (contrast)
         display.ssd1306_command(SSD1306_SETCONTRAST);
-        display.ssd1306_command((photocellValue > 3000) ? 255 : 50); // Bright or dim based on threshold
+        display.ssd1306_command((photocellValue > 900) ? 255 : 50); // Bright or dim based on threshold
 
         display.clearDisplay();
         display.setTextSize(1);
