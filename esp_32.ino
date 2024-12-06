@@ -18,6 +18,9 @@ WiFiServer server(80);
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 
 volatile int tC = 0;
+volatile int pC = 0;
+static unsigned long previousTime = 0; // Stores the last time pC was incremented
+unsigned long currentTime = millis(); // Current time
 
 void setup() {
   Serial.begin(115200);
@@ -112,10 +115,24 @@ void loop() {
         display.setCursor(0, 50);
         display.print("T->C:");
         display.print(tC);
-        display.print(" T->P:");
-        display.println("GOOD");
-        display.display();
+        display.print(" C->P");
 
+        // Check if the interval is 2 or 10 seconds and update pC accordingly
+        currentTime = millis(); // Update the current time
+        if (interval == 2) {
+          if (currentTime - previousTime >= 2000) { // 2000 milliseconds = 2 seconds
+            pC++; // Increment pC
+            previousTime = currentTime; // Update the last increment time
+          }
+        } else {
+          if (currentTime - previousTime >= 10000) { // 10000 milliseconds = 10 seconds
+            pC++; // Increment pC
+            previousTime = currentTime; // Update the last increment time
+          }
+        }
+
+        display.println(pC);
+        display.display();
 
         client.println("ACK: " + receivedData);
       }
